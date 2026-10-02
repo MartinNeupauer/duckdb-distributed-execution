@@ -16,10 +16,12 @@ struct FunctionParameters;
 class DuckherderPragmas {
 public:
 	static PragmaFunction GetUnregisterRemoteTableFunction();
+	static PragmaFunction GetQueryFunction();
 	static ScalarFunction GetLoadExtensionFunction();
 
 private:
 	static void UnregisterRemoteTable(ClientContext &context, const FunctionParameters &parameters);
+	static void Query(ClientContext &context, const FunctionParameters &parameters);
 	static void LoadExtension(DataChunk &args, ExpressionState &state, Vector &result);
 };
 

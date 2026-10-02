@@ -8,6 +8,7 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckherder_catalog.hpp"
 
@@ -16,6 +17,10 @@ namespace duckdb {
 /*static*/ PragmaFunction DuckherderPragmas::GetUnregisterRemoteTableFunction() {
 	return PragmaFunction::PragmaCall("duckherder_unregister_remote_table", UnregisterRemoteTable,
 	                                  {LogicalType {LogicalTypeId::VARCHAR}});
+}
+
+/*static*/ PragmaFunction DuckherderPragmas::GetQueryFunction() {
+	return PragmaFunction::PragmaCall("duckherder_query", Query, {LogicalType {LogicalTypeId::VARCHAR}});
 }
 
 /*static*/ ScalarFunction DuckherderPragmas::GetLoadExtensionFunction() {
@@ -43,6 +48,31 @@ namespace duckdb {
 		throw CatalogException("Failed to cast catalog to DuckherderCatalog");
 	}
 	dh_catalog_ptr->UnregisterRemoteTable(table_name);
+}
+
+/*static*/ void DuckherderPragmas::Query(ClientContext &context, const FunctionParameters &parameters) {
+	auto sql = parameters.values[0].ToString();
+	Parser parser;
+	parser.ParseQuery(sql);
+	if (parser.statements.size() != 1) {
+		throw ParserException("duckherder_query expects exactly one SQL statement");
+	}
+	auto statement_type = parser.statements[0]->type;
+	auto &db_manager = DatabaseManager::Get(context);
+	auto dh_db = db_manager.GetDatabase(context, "dh");
+	if (!dh_db) {
+		throw CatalogException("Duckherder database 'dh' not attached");
+	}
+	auto &catalog = dh_db->GetCatalog();
+	if (catalog.GetCatalogType() != "duckherder") {
+		throw CatalogException("Database 'dh' is not a duckherder database");
+	}
+	auto &client = dynamic_cast<DuckherderCatalog &>(catalog).GetClient(context);
+	auto result = client.ExecuteStatement(sql, statement_type, catalog.GetName());
+	if (result->HasError()) {
+		throw Exception(ExceptionType::EXECUTOR, StringUtil::Format("Server failed to execute statement %s: %s",
+																	sql, result->GetError()));
+	}
 }
 
 /*static*/ void DuckherderPragmas::LoadExtension(DataChunk &args, ExpressionState &state, Vector &result) {

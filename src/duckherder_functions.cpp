@@ -93,6 +93,11 @@ void RegisterDuckherderFunctions(ExtensionLoader &loader) {
 	                       /*description=*/"Removes a remote table mapping from the attached Duckherder catalog.",
 	                       /*examples=*/ {"PRAGMA duckherder_unregister_remote_table('orders');"},
 	                       /*categories=*/ {"duckherder", "distributed_execution", "catalog"});
+	RegisterPragmaFunction(loader, DuckherderPragmas::GetQueryFunction(),
+	                       /*parameter_names=*/ {"sql"},
+	                       /*description=*/"Executes a SQL statement on the attached Duckherder server.",
+	                       /*examples=*/ {"PRAGMA duckherder_query('CREATE TABLE items (id INTEGER)');"},
+	                       /*categories=*/ {"duckherder", "distributed_execution"});
 	RegisterScalarFunction(
 	    loader, DuckherderPragmas::GetLoadExtensionFunction(),
 	    /*parameter_names=*/ {"extension_name"},
