@@ -98,6 +98,11 @@ void RegisterDuckherderFunctions(ExtensionLoader &loader) {
 	                       /*description=*/"Executes a SQL statement on the attached Duckherder server.",
 	                       /*examples=*/ {"PRAGMA duckherder_query('CREATE TABLE items (id INTEGER)');"},
 	                       /*categories=*/ {"duckherder", "distributed_execution"});
+	RegisterTableFunction(loader, DuckherderPragmas::GetQueryTableFunction(),
+	                       /*parameter_names=*/ {"sql"},
+	                       /*description=*/"Executes a SQL statement on the attached Duckherder server and returns its result.",
+	                       /*examples=*/ {"SELECT * FROM duckherder_query('SELECT 42 AS answer');"},
+	                       /*categories=*/ {"duckherder", "distributed_execution"});
 	RegisterScalarFunction(
 	    loader, DuckherderPragmas::GetLoadExtensionFunction(),
 	    /*parameter_names=*/ {"extension_name"},

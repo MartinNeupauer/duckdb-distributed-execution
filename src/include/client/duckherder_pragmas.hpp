@@ -2,6 +2,7 @@
 
 #include "duckdb/function/pragma_function.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
 namespace duckdb {
@@ -17,6 +18,7 @@ class DuckherderPragmas {
 public:
 	static PragmaFunction GetUnregisterRemoteTableFunction();
 	static PragmaFunction GetQueryFunction();
+	static TableFunction GetQueryTableFunction();
 	static ScalarFunction GetLoadExtensionFunction();
 
 private:

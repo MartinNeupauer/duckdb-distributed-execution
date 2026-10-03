@@ -9,10 +9,76 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckherder_catalog.hpp"
 
 namespace duckdb {
+
+namespace {
+
+struct DuckherderQueryData : public TableFunctionData {
+	explicit DuckherderQueryData(shared_ptr<QueryResult> result_p) : result(std::move(result_p)) {
+	}
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<DuckherderQueryData>(result);
+	}
+	bool Equals(const FunctionData &other) const override {
+		return this == &other;
+	}
+	shared_ptr<QueryResult> result;
+};
+
+struct DuckherderQueryState : public GlobalTableFunctionState {
+	explicit DuckherderQueryState(shared_ptr<QueryResult> result_p) : result(std::move(result_p)) {
+	}
+	shared_ptr<QueryResult> result;
+};
+
+unique_ptr<FunctionData> BindDuckherderQuery(ClientContext &context, TableFunctionBindInput &input,
+                                             vector<LogicalType> &return_types, vector<string> &names) {
+	if (input.inputs.size() != 1) {
+		throw BinderException("duckherder_query requires a SQL string");
+	}
+	auto sql = input.inputs[0].ToString();
+	Parser parser;
+	parser.ParseQuery(sql);
+	if (parser.statements.size() != 1) {
+		throw ParserException("duckherder_query expects exactly one SQL statement");
+	}
+	auto &db_manager = DatabaseManager::Get(context);
+	auto dh_db = db_manager.GetDatabase(context, "dh");
+	if (!dh_db) {
+		throw CatalogException("Duckherder database 'dh' not attached");
+	}
+	auto &catalog = dh_db->GetCatalog();
+	if (catalog.GetCatalogType() != "duckherder") {
+		throw CatalogException("Database 'dh' is not a duckherder database");
+	}
+	auto result = catalog.Cast<DuckherderCatalog>().GetClient(context).ExecuteStatement(
+	    sql, parser.statements[0]->type, catalog.GetName());
+	if (result->HasError()) {
+		result->ThrowError();
+	}
+	return_types = result->types;
+	names = result->names;
+	return make_uniq<DuckherderQueryData>(shared_ptr<QueryResult>(std::move(result)));
+}
+
+unique_ptr<GlobalTableFunctionState> InitDuckherderQuery(ClientContext &context, TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<DuckherderQueryData>();
+	return make_uniq<DuckherderQueryState>(data.result);
+}
+
+void DuckherderQuery(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<DuckherderQueryState>();
+	auto chunk = state.result->Fetch();
+	if (chunk) {
+		output.Move(*chunk);
+	}
+}
+
+} // namespace
 
 /*static*/ PragmaFunction DuckherderPragmas::GetUnregisterRemoteTableFunction() {
 	return PragmaFunction::PragmaCall("duckherder_unregister_remote_table", UnregisterRemoteTable,
@@ -21,6 +87,11 @@ namespace duckdb {
 
 /*static*/ PragmaFunction DuckherderPragmas::GetQueryFunction() {
 	return PragmaFunction::PragmaCall("duckherder_query", Query, {LogicalType {LogicalTypeId::VARCHAR}});
+}
+
+/*static*/ TableFunction DuckherderPragmas::GetQueryTableFunction() {
+	return TableFunction("duckherder_query", {LogicalType {LogicalTypeId::VARCHAR}}, DuckherderQuery,
+	                     BindDuckherderQuery, InitDuckherderQuery);
 }
 
 /*static*/ ScalarFunction DuckherderPragmas::GetLoadExtensionFunction() {
