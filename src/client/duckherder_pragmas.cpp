@@ -55,8 +55,10 @@ unique_ptr<FunctionData> BindDuckherderQuery(ClientContext &context, TableFuncti
 	if (catalog.GetCatalogType() != "duckherder") {
 		throw CatalogException("Database 'dh' is not a duckherder database");
 	}
-	auto result = catalog.Cast<DuckherderCatalog>().GetClient(context).ExecuteStatement(
-	    sql, parser.statements[0]->type, catalog.GetName());
+	auto &client = catalog.Cast<DuckherderCatalog>().GetClient(context);
+	auto result = parser.statements[0]->type == StatementType::SELECT_STATEMENT
+	                  ? client.ScanTable(sql)
+	                  : client.ExecuteStatement(sql, parser.statements[0]->type, catalog.GetName());
 	if (result->HasError()) {
 		result->ThrowError();
 	}

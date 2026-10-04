@@ -165,7 +165,8 @@ arrow::Status WorkerNode::HandleExecutePartition(const distributed::ExecuteParti
 	if (req.storage_config().storage_case() == distributed::StorageConfig::kInMemory) {
 		return arrow::Status::Invalid("Workers cannot execute on control-node in-memory object storage");
 	}
-	ARROW_ASSIGN_OR_RAISE(auto object_storage_database, GetOrOpenObjectStorageDatabase(req.storage_config()));
+	ARROW_ASSIGN_OR_RAISE(auto object_storage_database,
+	                      GetOrOpenObjectStorageDatabase(req.storage_config(), req.load_httpfs()));
 	ARROW_ASSIGN_OR_RAISE(auto task_conn, object_storage_database->Connect());
 
 	// Execute the pipeline task with state tracking
@@ -278,11 +279,13 @@ arrow::Status WorkerNode::ExecuteSerializedPlan(const distributed::ExecutePartit
 }
 
 arrow::Result<ObjectStorageDatabase *>
-WorkerNode::GetOrOpenObjectStorageDatabase(const distributed::StorageConfig &config) {
+WorkerNode::GetOrOpenObjectStorageDatabase(const distributed::StorageConfig &config, bool load_httpfs) {
 	const concurrency::lock_guard<concurrency::mutex> lock(object_storage_mutex);
-	auto &instance = object_storage_databases[ObjectStorageDatabase::GetKey(config)];
+	auto key = ObjectStorageDatabase::GetKey(config);
+	key.insert(0, load_httpfs ? "httpfs:" : "plain:");
+	auto &instance = object_storage_databases[key];
 	if (!instance) {
-		auto database_result = ObjectStorageDatabase::Create(config, AccessMode::READ_ONLY);
+		auto database_result = ObjectStorageDatabase::Create(config, AccessMode::READ_ONLY, load_httpfs);
 		if (!database_result.ok()) {
 			return arrow::Status::IOError("Worker ", worker_id, " failed to attach ", config.database_uri(), ": ",
 			                              database_result.status().message());

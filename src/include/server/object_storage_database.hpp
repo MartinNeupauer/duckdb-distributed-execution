@@ -16,7 +16,7 @@ namespace duckdb {
 class ObjectStorageDatabase {
 public:
 	static arrow::Result<unique_ptr<ObjectStorageDatabase>> Create(const distributed::StorageConfig &config,
-	                                                               AccessMode access_mode);
+	                                                               AccessMode access_mode, bool load_httpfs = false);
 
 	// Create an independent session whose default catalog is this object storage database.
 	arrow::Result<unique_ptr<Connection>> Connect() const;

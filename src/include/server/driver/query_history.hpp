@@ -14,7 +14,8 @@ namespace duckdb {
 enum class QueryExecutionMode {
 	LOCAL,              // Local execution on driver (no distribution)
 	DELEGATED,          // No partition - delegated to single worker node
-	ROW_GROUP_PARTITION // Distributed with row-group-aligned partitioning
+	ROW_GROUP_PARTITION, // Distributed with row-group-aligned partitioning
+	ICEBERG_FILE_PARTITION
 };
 
 // Structure to store query execution information.

@@ -20,6 +20,7 @@ public:
 	// Creates tasks aligned with native DuckDB row groups when possible.
 	vector<DistributedPipelineTask> ExtractPipelineTasks(LogicalOperator &logical_plan, const string &base_sql,
 	                                                     idx_t num_workers);
+	vector<DistributedPipelineTask> ExtractIcebergCountTasks(const string &table_name, idx_t num_workers);
 
 private:
 	// Create a single non-distributed task.

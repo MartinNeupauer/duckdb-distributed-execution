@@ -5,6 +5,7 @@
 #include "server/driver/query_plan_analyzer.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -17,6 +18,62 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 
 namespace duckdb {
+
+vector<DistributedPipelineTask> TaskPartitioner::ExtractIcebergCountTasks(const string &table_name,
+                                                                         idx_t num_workers) {
+	auto metadata = conn.Query("SELECT file_path, manifest_content, status FROM iceberg_metadata(" +
+	                           Value(table_name).ToSQLString() + ")");
+	if (metadata->HasError()) {
+		throw IOException("Failed to list Iceberg data files for %s: %s", table_name, metadata->GetError());
+	}
+
+	vector<string> files;
+	unordered_set<string> seen;
+	for (auto chunk = metadata->Fetch(); chunk && chunk->size() > 0; chunk = metadata->Fetch()) {
+		for (idx_t row = 0; row < chunk->size(); ++row) {
+			const auto content = chunk->GetValue(1, row).ToString();
+			const auto status = chunk->GetValue(2, row).ToString();
+			if (StringUtil::CIEquals(status, "DELETED")) {
+				continue;
+			}
+			if (!StringUtil::CIEquals(content, "DATA")) {
+				throw NotImplementedException("Iceberg file sharding does not support live delete files in %s", table_name);
+			}
+			auto path = chunk->GetValue(0, row).ToString();
+			if (!seen.insert(path).second) {
+				throw IOException("Iceberg metadata lists data file %s more than once", path);
+			}
+			files.emplace_back(std::move(path));
+		}
+	}
+	if (files.empty()) {
+		return {};
+	}
+	std::sort(files.begin(), files.end());
+	const idx_t num_tasks = std::min(num_workers, files.size());
+	vector<vector<string>> assignments(num_tasks);
+	for (idx_t index = 0; index < files.size(); ++index) {
+		assignments[index % num_tasks].emplace_back(std::move(files[index]));
+	}
+
+	vector<DistributedPipelineTask> tasks;
+	tasks.reserve(num_tasks);
+	for (idx_t task_idx = 0; task_idx < num_tasks; ++task_idx) {
+		DistributedPipelineTask task;
+		vector<string> paths;
+		paths.reserve(assignments[task_idx].size());
+		for (const auto &path : assignments[task_idx]) {
+			paths.emplace_back(Value(path).ToSQLString());
+			task.load_httpfs = task.load_httpfs || StringUtil::StartsWith(path, "s3://");
+		}
+		task.task_id = task_idx;
+		task.total_tasks = num_tasks;
+		task.partition_strategy = PartitionStrategy::ICEBERG_FILES;
+		task.task_sql = "SELECT count(*) AS __c0 FROM read_parquet([" + StringUtil::Join(paths, ", ") + "])";
+		tasks.emplace_back(std::move(task));
+	}
+	return tasks;
+}
 
 TaskPartitioner::TaskPartitioner(Connection &conn_p, QueryPlanAnalyzer &analyzer_p)
     : conn(conn_p), analyzer(analyzer_p) {
@@ -99,6 +156,7 @@ vector<DistributedPipelineTask> TaskPartitioner::ExtractPipelineTasks(LogicalOpe
 		DistributedPipelineTask task;
 		task.task_id = task_idx;
 		task.total_tasks = num_tasks;
+		task.partition_strategy = num_tasks == 1 ? PartitionStrategy::NONE : PartitionStrategy::ROW_GROUP_ALIGNED;
 		task.row_group_start = rg_start;
 		task.row_group_end = rg_end - 1;
 		// Create SQL with row group-aligned half-open rowid filter.

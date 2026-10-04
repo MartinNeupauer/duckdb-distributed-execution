@@ -5,6 +5,7 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
@@ -39,7 +40,9 @@ arrow::Status RegisterS3Secret(Connection &conn, const distributed::S3Storage &c
 		secret_type.name = "s3";
 		secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 		secret_type.default_provider = "config";
-		secret_manager.RegisterSecretType(secret_type);
+		if (!conn.context->db->ExtensionIsLoaded("httpfs")) {
+			secret_manager.RegisterSecretType(secret_type);
+		}
 
 		auto secret = make_uniq<KeyValueSecret>(vector<string> {S3Scope(config)}, "s3", "config", "__duckherder_s3");
 		if (!config.key_id().empty()) {
@@ -137,12 +140,15 @@ string ObjectStorageDatabase::GetKey(const distributed::StorageConfig &config) {
 ObjectStorageDatabase::ObjectStorageDatabase(shared_ptr<DuckDB> instance_p) : instance(std::move(instance_p)) {
 }
 
-arrow::Result<unique_ptr<ObjectStorageDatabase>> ObjectStorageDatabase::Create(const distributed::StorageConfig &config,
-                                                                               AccessMode access_mode) {
+arrow::Result<unique_ptr<ObjectStorageDatabase>>
+ObjectStorageDatabase::Create(const distributed::StorageConfig &config, AccessMode access_mode, bool load_httpfs) {
 	try {
 		auto instance = make_shared_ptr<DuckDB>(/*path=*/nullptr, /*config=*/nullptr);
 		instance->LoadStaticExtension<CoreFunctionsExtension>();
 		Connection conn(*instance);
+		if (load_httpfs || config.storage_case() == distributed::StorageConfig::kS3) {
+			ARROW_RETURN_NOT_OK(Execute(conn, "LOAD httpfs"));
+		}
 		ARROW_RETURN_NOT_OK(Execute(conn, "LOAD duckdb_object_storage"));
 		// Arrow 1.5 encodes decimals at their physical width instead of always as 128-bit, shrinking scan results.
 		ARROW_RETURN_NOT_OK(Execute(conn, "SET GLOBAL arrow_output_version = '1.5'"));

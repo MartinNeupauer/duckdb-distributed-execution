@@ -20,6 +20,12 @@ class Connection;
 class WorkerManager;
 class LogicalOperator;
 
+enum class PartitionStrategy {
+	NONE,
+	ROW_GROUP_ALIGNED,
+	ICEBERG_FILES,
+};
+
 // Struct which represents a distributed pipeline task.
 // This represents one unit of work that will be executed on a worker.
 struct DistributedPipelineTask {
@@ -28,6 +34,8 @@ struct DistributedPipelineTask {
 
 	// Total number of parallel tasks.
 	idx_t total_tasks = 0;
+	PartitionStrategy partition_strategy = PartitionStrategy::NONE;
+	bool load_httpfs = false;
 
 	// The SQL query to execute (for now, we'll start with SQL-based approach).
 	// Future: serialize actual Pipeline structure.
@@ -38,12 +46,6 @@ struct DistributedPipelineTask {
 	idx_t row_group_start = 0;
 	// Ending row group for this task (inclusive).
 	idx_t row_group_end = 0;
-};
-
-// Partitioning strategy used for distributed execution.
-enum class PartitionStrategy {
-	NONE,              // No partitioning (single task)
-	ROW_GROUP_ALIGNED, // Partitioned by DuckDB row groups
 };
 
 // Result structure containing query result and execution metadata.
@@ -60,7 +62,7 @@ struct DistributedExecutionResult {
 	std::chrono::milliseconds worker_execution_time;
 
 	DistributedExecutionResult()
-	    : merge_strategy(QueryPlanAnalyzer::MergeStrategy::CONCATENATE), partition_strategy(PartitionStrategy::NONE),
+	    : partition_strategy(PartitionStrategy::NONE), merge_strategy(QueryPlanAnalyzer::MergeStrategy::CONCATENATE),
 	      worker_execution_time(0) {
 	}
 };
@@ -73,7 +75,7 @@ public:
 
 	// Execute a query in distributed manner.
 	// Returns result with nullptr if query cannot be distributed, which will fall back to local execution.
-	DistributedExecutionResult ExecuteDistributed(const string &sql);
+	DistributedExecutionResult ExecuteDistributed(const string &sql, bool iceberg_count_only = false);
 
 private:
 	WorkerManager &worker_manager;

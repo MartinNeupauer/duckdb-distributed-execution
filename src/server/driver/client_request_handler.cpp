@@ -7,6 +7,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/prepared_statement.hpp"
 #include "query_common.hpp"
+#include "server/driver/distributed_executor.hpp"
 #include "server/driver/query_history.hpp"
 #include "server/driver/query_utils.hpp"
 #include "server/driver/worker_fragment_pushdown.hpp"
@@ -248,9 +249,21 @@ arrow::Status ClientRequestHandler::ScanTable(const distributed::ScanTableReques
 	auto query_start = std::chrono::steady_clock::now();                // For duration calculation
 	query_info.execution_start_time = std::chrono::system_clock::now(); // Wall-clock timestamp
 
-	// The driver plans the query, running its single-table fragments on workers when possible.
-	vector<Value> parameters;
-	auto result = prepared->Execute(parameters, /*allow_stream_result=*/false);
+	unique_ptr<QueryResult> result;
+	if (registration.distributed_executor) {
+		auto distributed = registration.distributed_executor->ExecuteDistributed(sql, /*iceberg_count_only=*/true);
+		if (distributed.result) {
+			result = std::move(distributed.result);
+			query_info.execution_mode = QueryExecutionMode::ICEBERG_FILE_PARTITION;
+			query_info.merge_strategy = distributed.merge_strategy;
+			query_info.num_workers_used = distributed.num_workers_used;
+			query_info.num_tasks_generated = distributed.num_tasks;
+		}
+	}
+	if (!result) {
+		vector<Value> parameters;
+		result = prepared->Execute(parameters, /*allow_stream_result=*/false);
+	}
 
 	// Calculate total query duration (using steady_clock for accurate elapsed time)
 	auto query_end = std::chrono::steady_clock::now();

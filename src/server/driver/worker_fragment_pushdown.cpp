@@ -222,9 +222,17 @@ vector<unique_ptr<DataChunk>> WorkerFragmentState::Execute(ClientContext &contex
 		}
 	}
 	if (ran_distributed) {
-		info.execution_mode = distributed.partition_strategy == PartitionStrategy::NONE
-		                          ? QueryExecutionMode::DELEGATED
-		                          : QueryExecutionMode::ROW_GROUP_PARTITION;
+		switch (distributed.partition_strategy) {
+		case PartitionStrategy::NONE:
+			info.execution_mode = QueryExecutionMode::DELEGATED;
+			break;
+		case PartitionStrategy::ROW_GROUP_ALIGNED:
+			info.execution_mode = QueryExecutionMode::ROW_GROUP_PARTITION;
+			break;
+		case PartitionStrategy::ICEBERG_FILES:
+			info.execution_mode = QueryExecutionMode::ICEBERG_FILE_PARTITION;
+			break;
+		}
 		info.merge_strategy = distributed.merge_strategy;
 		info.num_workers_used = distributed.num_workers_used;
 		info.num_tasks_generated = distributed.num_tasks;

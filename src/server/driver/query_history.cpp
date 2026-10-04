@@ -36,6 +36,9 @@ void QueryHistory::FillStatsResponse(distributed::DistributedResponse &resp) con
 		case QueryExecutionMode::ROW_GROUP_PARTITION:
 			query_info->set_execution_mode("ROW_GROUP_PARTITION");
 			break;
+		case QueryExecutionMode::ICEBERG_FILE_PARTITION:
+			query_info->set_execution_mode("ICEBERG_FILE_PARTITION");
+			break;
 		}
 
 		switch (exec_info.merge_strategy) {

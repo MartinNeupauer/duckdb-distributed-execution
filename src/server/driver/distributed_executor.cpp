@@ -8,10 +8,14 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
@@ -26,6 +30,41 @@
 #include <arrow/util/future.h>
 
 namespace duckdb {
+
+namespace {
+
+string IcebergCountTable(ClientContext &context, const SelectStatement &statement) {
+	if (statement.node->type != QueryNodeType::SELECT_NODE) {
+		return {};
+	}
+	auto &select = statement.node->Cast<SelectNode>();
+	if (!select.from_table || select.from_table->type != TableReferenceType::BASE_TABLE ||
+	    select.select_list.size() != 1 || select.select_list[0]->GetExpressionClass() != ExpressionClass::FUNCTION ||
+	    select.where_clause || select.having || select.qualify || !select.modifiers.empty() || !select.cte_map.map.empty() ||
+	    !select.groups.group_expressions.empty() || select.sample || select.from_table->sample) {
+		return {};
+	}
+	auto &count = select.select_list[0]->Cast<FunctionExpression>();
+	if (!StringUtil::CIEquals(count.function_name, "count_star") || !count.children.empty() || count.distinct ||
+	    count.filter || (count.order_bys && !count.order_bys->orders.empty())) {
+		return {};
+	}
+	auto &table = select.from_table->Cast<BaseTableRef>();
+	if (table.catalog_name.empty() || table.schema_name.empty() || table.at_clause) {
+		return {};
+	}
+	bool is_iceberg = false;
+	context.RunFunctionInTransaction([&]() {
+		auto database = DatabaseManager::Get(context).GetDatabase(context, table.catalog_name);
+		is_iceberg = database && StringUtil::CIEquals(database->GetCatalog().GetCatalogType(), "iceberg");
+	});
+	if (!is_iceberg) {
+		return {};
+	}
+	return table.catalog_name + "." + table.schema_name + "." + table.table_name;
+}
+
+} // namespace
 
 DistributedExecutor::DistributedExecutor(WorkerManager &worker_manager_p, Connection &conn_p,
                                          distributed::StorageConfig storage_config_p)
@@ -52,12 +91,9 @@ DistributedExecutor::DistributedExecutor(WorkerManager &worker_manager_p, Connec
 // 3. Each worker executes its partition (LocalState semantics) [WORKER]
 // 4. Driver collects and combines results (GlobalState semantics) [Driver]
 // 5. Final result is returned to client [Driver]
-DistributedExecutionResult DistributedExecutor::ExecuteDistributed(const string &sql) {
+DistributedExecutionResult DistributedExecutor::ExecuteDistributed(const string &sql, bool iceberg_count_only) {
 	DistributedExecutionResult exec_result;
 	auto &db_instance = *conn.context->db;
-
-	// Start timing worker execution
-	auto worker_start = std::chrono::high_resolution_clock::now();
 
 	// Which operators can be distributed is checked on the plan.
 	Parser parser;
@@ -71,6 +107,10 @@ DistributedExecutionResult DistributedExecutor::ExecuteDistributed(const string 
 		return exec_result;
 	}
 	const auto &statement = parser.statements[0]->Cast<SelectStatement>();
+	const auto iceberg_table = iceberg_count_only ? IcebergCountTable(*conn.context, statement) : string();
+	if (iceberg_count_only && iceberg_table.empty()) {
+		return exec_result;
+	}
 
 	auto workers = worker_manager.GetAvailableWorkers();
 	if (workers.empty()) {
@@ -78,28 +118,27 @@ DistributedExecutionResult DistributedExecutor::ExecuteDistributed(const string 
 		return exec_result;
 	}
 
-	// Phase 1: Plan extraction and validation
-	unique_ptr<LogicalOperator> logical_plan = conn.ExtractPlan(sql);
-	if (logical_plan == nullptr) {
-		return exec_result;
+	QueryPlanAnalyzer::QueryAnalysis query_analysis;
+	bool partitioned_aggregation = false;
+	vector<DistributedPipelineTask> tasks;
+	if (!iceberg_table.empty()) {
+		tasks = task_partitioner->ExtractIcebergCountTasks(iceberg_table, workers.size());
+		partitioned_aggregation = !tasks.empty();
+		query_analysis.merge_strategy = QueryPlanAnalyzer::MergeStrategy::AGGREGATE_MERGE;
+		query_analysis.final_sql =
+		    StringUtil::Format("SELECT sum(__c0) FROM %s", QueryPlanAnalyzer::PARTIAL_TABLE_NAME);
+	} else {
+		unique_ptr<LogicalOperator> logical_plan = conn.ExtractPlan(sql);
+		if (logical_plan == nullptr || !IsSupportedPlan(*logical_plan)) {
+			return exec_result;
+		}
+		query_analysis = plan_analyzer->AnalyzeQuery(*logical_plan, statement);
+		partitioned_aggregation = query_analysis.supports_partitioned_aggregation &&
+		                          storage_config.storage_case() != distributed::StorageConfig::STORAGE_NOT_SET;
+		const string &execution_sql = partitioned_aggregation ? query_analysis.partial_sql : sql;
+		const idx_t partition_workers = query_analysis.has_aggregation && !partitioned_aggregation ? 1 : workers.size();
+		tasks = task_partitioner->ExtractPipelineTasks(*logical_plan, execution_sql, partition_workers);
 	}
-	if (!IsSupportedPlan(*logical_plan)) {
-		DUCKDB_LOG_DEBUG(db_instance,
-		                 StringUtil::Format("Logical plan for query '%s' contains unsupported operators", sql));
-		return exec_result;
-	}
-
-	// Analyze query to determine merge strategy
-	QueryPlanAnalyzer::QueryAnalysis query_analysis = plan_analyzer->AnalyzeQuery(*logical_plan, statement);
-	const bool partitioned_aggregation = query_analysis.supports_partitioned_aggregation &&
-	                                     storage_config.storage_case() != distributed::StorageConfig::STORAGE_NOT_SET;
-	// The partial query scans the same table with the same filters, so it is partitioned with the original plan.
-	const string &execution_sql = partitioned_aggregation ? query_analysis.partial_sql : sql;
-
-	// Phase 2: Extract pipeline tasks and distribute to workers
-	// This replaces the old 1-partition-per-worker approach with flexible task distribution
-	const idx_t partition_workers = query_analysis.has_aggregation && !partitioned_aggregation ? 1 : workers.size();
-	auto tasks = task_partitioner->ExtractPipelineTasks(*logical_plan, execution_sql, partition_workers);
 	if (tasks.empty()) {
 		return exec_result;
 	}
@@ -113,7 +152,7 @@ DistributedExecutionResult DistributedExecutor::ExecuteDistributed(const string 
 	exec_result.num_tasks = tasks.size();
 	exec_result.num_workers_used = tasks.size();
 
-	exec_result.partition_strategy = tasks.size() == 1 ? PartitionStrategy::NONE : PartitionStrategy::ROW_GROUP_ALIGNED;
+	exec_result.partition_strategy = tasks[0].partition_strategy;
 
 	// Map tasks to workers using round-robin
 	// The partitioner creates at most one task per worker; tables with fewer row groups than workers yield M < N.
@@ -136,7 +175,10 @@ DistributedExecutionResult DistributedExecutor::ExecuteDistributed(const string 
 	vector<LogicalType> types = prepared->GetTypes();
 	vector<string> partial_names = names;
 	vector<LogicalType> partial_types = types;
-	if (partitioned_aggregation) {
+	if (!iceberg_table.empty()) {
+		partial_names = {"__c0"};
+		partial_types = {LogicalType::BIGINT};
+	} else if (partitioned_aggregation) {
 		auto partial_prepared = conn.Prepare(query_analysis.partial_sql);
 		if (partial_prepared->HasError()) {
 			throw InternalException("Failed to prepare partial aggregate query '%s': %s", query_analysis.partial_sql,
@@ -159,6 +201,7 @@ DistributedExecutionResult DistributedExecutor::ExecuteDistributed(const string 
 		req.set_sql(task.task_sql);
 		req.set_partition_id(task.task_id);
 		req.set_total_partitions(task.total_tasks);
+		req.set_load_httpfs(task.load_httpfs);
 		*req.mutable_storage_config() = storage_config;
 		for (const auto &name : partial_names) {
 			req.add_column_names(name);

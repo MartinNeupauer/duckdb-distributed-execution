@@ -280,6 +280,10 @@ For multi-machine setups, start worker nodes on separate machines:
 ./build/release/distributed_worker 0.0.0.0 8817 worker-2
 ```
 
+For Iceberg count tasks that read `s3://` Parquet files, install `httpfs` on each worker machine. The worker loads it
+when it opens the task database. The worker also needs an S3 secret whose scope covers the Iceberg data files;
+Duckherder currently forwards only the secret configured for its `DATA_PATH`.
+
 ## Object Storage
 
 The build can attach a native DuckDB database stored in S3-compatible object

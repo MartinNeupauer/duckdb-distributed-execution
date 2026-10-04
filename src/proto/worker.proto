@@ -15,6 +15,7 @@ message ExecutePartitionRequest {
   repeated bytes column_types = 7;
   // Database the task reads from; the worker attaches it read-only on first use.
   StorageConfig storage_config = 8;
+  bool load_httpfs = 9;
 }
 
 // Partition data is returned over Arrow Flight.

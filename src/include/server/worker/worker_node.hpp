@@ -49,7 +49,8 @@ private:
 
 	// Return this worker's read-only instance for the configuration, attaching it on first use.
 	// The instance is a snapshot from that first attach; later writes are not visible through it.
-	arrow::Result<ObjectStorageDatabase *> GetOrOpenObjectStorageDatabase(const distributed::StorageConfig &config);
+	arrow::Result<ObjectStorageDatabase *> GetOrOpenObjectStorageDatabase(const distributed::StorageConfig &config,
+	                                                                   bool load_httpfs);
 
 	string worker_id;
 	string host;
@@ -58,7 +59,7 @@ private:
 	unique_ptr<Connection> conn;
 
 	concurrency::mutex object_storage_mutex;
-	// Keyed by storage identity without credentials. Instances stay attached for the worker's lifetime.
+	// Keyed by storage identity without credentials and whether httpfs is loaded.
 	//
 	// TODO(hjiang): Evict an instance when the final client detaches. Worker-lifetime caches retain resources, and
 	// their read-only snapshots do not see later writes.
