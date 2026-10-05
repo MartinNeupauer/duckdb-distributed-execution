@@ -59,6 +59,11 @@ ATTACH DATABASE 'localhost:8821/database.db' AS dh (TYPE duckherder, READ_ONLY, 
 statement ok
 USE dh;
 
+query I
+SELECT * FROM duckherder_query('SELECT COUNT(*) FROM rg_medium_table');
+----
+250000
+
 # Test 1: Verify data integrity with aggregations
 query III
 SELECT 
